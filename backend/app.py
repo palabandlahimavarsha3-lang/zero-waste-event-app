@@ -14,7 +14,7 @@ from prediction import (
 )
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 EVENT_STATUSES = {"Upcoming", "Planning", "Completed"}
 EVENT_CATEGORIES = {
