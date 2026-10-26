@@ -1,7 +1,14 @@
-const requestTimeout = 5000
+const RAW_API_URL = import.meta.env.VITE_API_URL || 'https://zero-waste-event-app.onrender.com'
+export const API_BASE_URL = RAW_API_URL.replace(/\/$/, '')
+
+const requestTimeout = 15000
 
 async function request(path, options = {}) {
-  const response = await fetch(path, {
+  const url = path.startsWith('http://') || path.startsWith('https://')
+    ? path
+    : `${API_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`
+
+  const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     signal: AbortSignal.timeout(requestTimeout),
     ...options,
@@ -13,6 +20,7 @@ async function request(path, options = {}) {
   }
   return data
 }
+
 
 export function mapEvent(row) {
   return {

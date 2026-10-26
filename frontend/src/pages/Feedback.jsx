@@ -16,7 +16,7 @@ function Feedback() {
   const [sent, setSent] = useState('')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [live, setLive] = useState(false)
+  const [live, setLive] = useState(null)
   const [entries, setEntries] = useState([])
   const [eventsList, setEventsList] = useState([])
 

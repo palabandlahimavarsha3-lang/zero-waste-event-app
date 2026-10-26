@@ -26,7 +26,7 @@ import {
 } from '../data/sampleData'
 
 function Dashboard() {
-  const [live, setLive] = useState(false)
+  const [live, setLive] = useState(null)
   const [stats, setStats] = useState(sampleStats)
   const [wasteShare, setWasteShare] = useState(sampleShare)
   const [upcoming, setUpcoming] = useState(

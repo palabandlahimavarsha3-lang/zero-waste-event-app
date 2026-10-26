@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 from datetime import datetime
 
@@ -6,15 +7,44 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 
-from database import calculate_prediction, get_db, init_db
+from database import calculate_prediction, get_db, init_db, set_db_path
 from prediction import (
     ESTIMATE_DISCLAIMER,
     get_available_measures,
     predict_waste,
 )
 
-app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+app = Flask(__name__, instance_relative_config=True)
+
+# 1. Instance path and persistent SQLite database configuration
+os.makedirs(app.instance_path, exist_ok=True)
+db_file = os.environ.get("DATABASE_PATH") or os.path.join(app.instance_path, "zerowaste.db")
+set_db_path(db_file)
+
+# 2. CORS configuration: allow all origins, all methods, and credentials
+CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
+
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = app.make_default_options_response()
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return response
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    return response
+
+# 3. Health check route
+@app.route("/api/health", methods=["GET"])
+@app.route("/health", methods=["GET"])
+def health_check():
+    return jsonify({"status": "ok"})
 
 EVENT_STATUSES = {"Upcoming", "Planning", "Completed"}
 EVENT_CATEGORIES = {

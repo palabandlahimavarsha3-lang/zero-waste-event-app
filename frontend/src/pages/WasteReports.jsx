@@ -30,7 +30,7 @@ const emptyReportForm = {
 }
 
 function WasteReports() {
-  const [live, setLive] = useState(false)
+  const [live, setLive] = useState(null)
   const [monthly, setMonthly] = useState(sampleMonthly)
   const [eventReports, setEventReports] = useState(sampleReports)
   const [rawLogs, setRawLogs] = useState([])

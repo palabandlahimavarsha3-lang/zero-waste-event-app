@@ -1,9 +1,14 @@
 function DataBanner({ live, message }) {
+  // Only display banner if an actual failure occurred (live === false)
+  if (live !== false) {
+    return null
+  }
   return (
-    <p className={live ? 'data-banner live' : 'data-banner fallback'}>
+    <p className="data-banner fallback" role="alert">
       {message}
     </p>
   )
 }
 
 export default DataBanner
+

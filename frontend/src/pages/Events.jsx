@@ -37,7 +37,7 @@ const emptyWaste = {
 
 function Events() {
   const [list, setList] = useState(seedEvents)
-  const [live, setLive] = useState(false)
+  const [live, setLive] = useState(null)
   const [error, setError] = useState('')
   const [successMsg, setSuccessMsg] = useState('')
   const [form, setForm] = useState(emptyEvent)
@@ -138,15 +138,12 @@ function Events() {
     setError('')
     setSuccessMsg('')
 
-    if (live) {
-      try {
-        await deleteEvent(event.id)
-        setSuccessMsg(`Event "${event.name}" deleted successfully.`)
-        await loadEvents()
-      } catch (err) {
-        setError(err.message || 'Failed to delete event.')
-      }
-    } else {
+    try {
+      await deleteEvent(event.id)
+      setSuccessMsg(`Event "${event.name}" deleted successfully.`)
+      await loadEvents()
+    } catch {
+      setLive(false)
       setList((prev) => prev.filter((item) => item.id !== event.id))
       setSuccessMsg(`Event "${event.name}" removed from local list.`)
     }
@@ -203,12 +200,14 @@ function Events() {
     try {
       if (editingId) {
         // Update Event
-        if (live) {
+        try {
           const updated = await updateEvent(editingId, payload)
           setList((current) =>
             current.map((item) => (item.id === editingId ? updated : item)),
           )
-        } else {
+          setLive(true)
+        } catch {
+          setLive(false)
           setList((current) =>
             current.map((item) =>
               item.id === editingId ? { ...item, ...payload, date: payload.event_date } : item,
@@ -219,10 +218,12 @@ function Events() {
         cancelEdit()
       } else {
         // Create Event
-        if (live) {
+        try {
           const created = await createEvent(payload)
           setList((current) => [created, ...current])
-        } else {
+          setLive(true)
+        } catch {
+          setLive(false)
           setList((current) => [
             {
               id: Date.now(),
@@ -540,20 +541,6 @@ function Events() {
     setSubmittingWaste(true)
 
     try {
-      if (!live) {
-        // Update local list
-        setList((current) =>
-          current.map((item) =>
-            String(item.id) === String(waste.eventId)
-              ? { ...item, wasteKg: (item.wasteKg || 0) + amount }
-              : item,
-          ),
-        )
-        setSuccessMsg(`Logged ${amount} kg of ${waste.category} waste locally.`)
-        setWaste({ ...emptyWaste, eventId: waste.eventId })
-        return
-      }
-
       await addWasteLog(waste.eventId, {
         category: waste.category,
         amount_kg: amount,
@@ -566,9 +553,20 @@ function Events() {
         `Logged ${amount} kg of ${waste.category} waste for "${targetEvent?.name || 'event'}"!`,
       )
       setWaste({ ...emptyWaste, eventId: waste.eventId })
+      setLive(true)
       await loadEvents()
-    } catch (err) {
-      setError(err.message || 'Failed to add waste log.')
+    } catch {
+      setLive(false)
+      // Update local list
+      setList((current) =>
+        current.map((item) =>
+          String(item.id) === String(waste.eventId)
+            ? { ...item, wasteKg: (item.wasteKg || 0) + amount }
+            : item,
+        ),
+      )
+      setSuccessMsg(`Logged ${amount} kg of ${waste.category} waste locally.`)
+      setWaste({ ...emptyWaste, eventId: waste.eventId })
     } finally {
       setSubmittingWaste(false)
     }

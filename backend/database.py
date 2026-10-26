@@ -10,11 +10,46 @@ from prediction import (
     predict_waste,
 )
 
-DB_PATH = Path(__file__).parent / "zerowaste.db"
-LEGACY_DB_PATH = Path(__file__).parent / "zero_waste.db"
-if not DB_PATH.exists() and LEGACY_DB_PATH.exists():
-    import shutil
-    shutil.copyfile(LEGACY_DB_PATH, DB_PATH)
+# SQLite persistent database path resolution
+# Supports environment variable DATABASE_PATH (e.g. Render persistent disk /var/data/zerowaste.db),
+# Flask instance path, or fallback to instance/zerowaste.db
+import os
+import shutil
+
+def _resolve_initial_db_path():
+    env_path = os.environ.get("DATABASE_PATH")
+    if env_path:
+        return Path(env_path).resolve()
+    # Default to instance directory relative to backend
+    instance_dir = Path(__file__).resolve().parent / "instance"
+    os.makedirs(instance_dir, exist_ok=True)
+    return (instance_dir / "zerowaste.db").resolve()
+
+DB_PATH = _resolve_initial_db_path()
+
+def _ensure_db_file_copied():
+    global DB_PATH
+    os.makedirs(DB_PATH.parent, exist_ok=True)
+    legacy_candidates = [
+        Path(__file__).resolve().parent / "zerowaste.db",
+        Path(__file__).resolve().parent / "zero_waste.db",
+    ]
+    if not DB_PATH.exists() or DB_PATH.stat().st_size == 0:
+        for legacy in legacy_candidates:
+            if legacy.exists() and legacy.resolve() != DB_PATH.resolve() and legacy.stat().st_size > 0:
+                try:
+                    shutil.copyfile(legacy, DB_PATH)
+                    break
+                except Exception:
+                    pass
+
+def set_db_path(new_path):
+    global DB_PATH
+    DB_PATH = Path(new_path).resolve()
+    os.makedirs(DB_PATH.parent, exist_ok=True)
+    _ensure_db_file_copied()
+
+_ensure_db_file_copied()
 
 PRED_FACTORS = {
     "Technical": 0.05,
@@ -28,6 +63,7 @@ PRED_FACTORS = {
 
 
 def get_connection():
+    os.makedirs(DB_PATH.parent, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
