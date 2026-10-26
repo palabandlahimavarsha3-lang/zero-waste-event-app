@@ -1,6 +1,10 @@
 import json
+import os
+import re
+import shutil
 import sqlite3
 from contextlib import contextmanager
+from datetime import date, datetime
 from pathlib import Path
 
 from prediction import (
@@ -10,25 +14,56 @@ from prediction import (
     predict_waste,
 )
 
-# SQLite persistent database path resolution
-# Supports environment variable DATABASE_PATH (e.g. Render persistent disk /var/data/zerowaste.db),
-# Flask instance path, or fallback to instance/zerowaste.db
-import os
-import shutil
+PRED_FACTORS = {
+    "Technical": 0.05,
+    "Cultural": 0.08,
+    "Food": 0.12,
+    "Awareness": 0.03,
+    "Sports": 0.07,
+    "Student Club": 0.04,
+    "Campus": 0.05,
+}
 
+# --- Database Connection and Configuration ---
+
+def get_database_url():
+    """Returns normalized Postgres connection URL if configured, otherwise None."""
+    url = (
+        os.environ.get("DATABASE_URL")
+        or os.environ.get("POSTGRES_URL")
+        or os.environ.get("NEON_DATABASE_URL")
+    )
+    if url and (url.startswith("postgres://") or url.startswith("postgresql://")):
+        # SQLAlchemy / psycopg2 compatibility: replace postgres:// with postgresql://
+        if url.startswith("postgres://"):
+            url = "postgresql://" + url[len("postgres://"):]
+        # Ensure sslmode=require for Neon serverless Postgres
+        if "sslmode=" not in url:
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}sslmode=require"
+        return url
+    return None
+
+
+def is_postgres():
+    return get_database_url() is not None
+
+
+# SQLite Fallback Configuration
 def _resolve_initial_db_path():
     env_path = os.environ.get("DATABASE_PATH")
     if env_path:
         return Path(env_path).resolve()
-    # Default to instance directory relative to backend
     instance_dir = Path(__file__).resolve().parent / "instance"
     os.makedirs(instance_dir, exist_ok=True)
     return (instance_dir / "zerowaste.db").resolve()
 
 DB_PATH = _resolve_initial_db_path()
 
-def _ensure_db_file_copied():
+def _ensure_sqlite_file_copied():
     global DB_PATH
+    if is_postgres():
+        return
     os.makedirs(DB_PATH.parent, exist_ok=True)
     legacy_candidates = [
         Path(__file__).resolve().parent / "zerowaste.db",
@@ -47,27 +82,131 @@ def set_db_path(new_path):
     global DB_PATH
     DB_PATH = Path(new_path).resolve()
     os.makedirs(DB_PATH.parent, exist_ok=True)
-    _ensure_db_file_copied()
+    _ensure_sqlite_file_copied()
 
-_ensure_db_file_copied()
+_ensure_sqlite_file_copied()
 
-PRED_FACTORS = {
-    "Technical": 0.05,
-    "Cultural": 0.08,
-    "Food": 0.12,
-    "Awareness": 0.03,
-    "Sports": 0.07,
-    "Student Club": 0.04,
-    "Campus": 0.05,
-}
+
+# --- SQL Query Adapter for Postgres ---
+
+def adapt_sql_for_postgres(sql):
+    adapted = sql.replace('?', '%s')
+    adapted = adapted.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    adapted = adapted.replace("strftime('%m', created_at)", "to_char(created_at::timestamp, 'MM')")
+    adapted = adapted.replace("strftime('%Y-%m', created_at)", "to_char(created_at::timestamp, 'YYYY-MM')")
+    adapted = adapted.replace("datetime('now')", "CURRENT_TIMESTAMP")
+    # Cast SUM/COALESCE inside ROUND to numeric for Postgres float handling
+    adapted = re.sub(
+        r"ROUND\((COALESCE\(SUM\([^)]+\),\s*0\)),\s*2\)",
+        r"ROUND((\1)::numeric, 2)",
+        adapted,
+        flags=re.IGNORECASE,
+    )
+    return adapted
+
+
+def _format_pg_row(row):
+    if row is None:
+        return None
+    # RealDictRow is a dict subclass. Ensure datetime/date objects are formatted as strings
+    # for 100% parity with SQLite row responses
+    formatted = dict(row)
+    for k, v in formatted.items():
+        if isinstance(v, (datetime, date)):
+            formatted[k] = v.strftime("%Y-%m-%d %H:%M:%S")
+    return formatted
+
+
+class PostgresCursorWrapper:
+    def __init__(self, raw_cursor):
+        self._cursor = raw_cursor
+        self.lastrowid = None
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    @property
+    def description(self):
+        return self._cursor.description
+
+    def execute(self, query, params=None):
+        adapted = adapt_sql_for_postgres(query)
+        is_insert = adapted.strip().upper().startswith("INSERT INTO")
+        has_returning = "RETURNING" in adapted.upper()
+
+        if is_insert and not has_returning:
+            adapted = f"{adapted} RETURNING id"
+            self._cursor.execute(adapted, params or ())
+            try:
+                row = self._cursor.fetchone()
+                if row:
+                    self.lastrowid = row["id"] if isinstance(row, dict) else row[0]
+            except Exception:
+                self.lastrowid = None
+            return self
+
+        self._cursor.execute(adapted, params or ())
+        return self
+
+    def executemany(self, query, params_list):
+        adapted = adapt_sql_for_postgres(query)
+        self._cursor.executemany(adapted, params_list)
+        return self
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        return _format_pg_row(row)
+
+    def fetchall(self):
+        rows = self._cursor.fetchall()
+        return [_format_pg_row(r) for r in rows]
+
+    def close(self):
+        self._cursor.close()
+
+    def __iter__(self):
+        for row in self._cursor:
+            yield _format_pg_row(row)
+
+
+class PostgresConnectionWrapper:
+    def __init__(self, raw_connection):
+        self._conn = raw_connection
+
+    def cursor(self):
+        import psycopg2.extras
+        raw_cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        return PostgresCursorWrapper(raw_cur)
+
+    def execute(self, query, params=None):
+        cur = self.cursor()
+        cur.execute(query, params)
+        return cur
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
 
 
 def get_connection():
-    os.makedirs(DB_PATH.parent, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    return connection
+    db_url = get_database_url()
+    if db_url:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = False
+        return PostgresConnectionWrapper(conn)
+    else:
+        os.makedirs(DB_PATH.parent, exist_ok=True)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
 
 
 @contextmanager
@@ -84,17 +223,32 @@ def get_db():
 
 
 def _add_column_if_missing(cursor, table, column, definition):
-    existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
-    if column not in existing:
-        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    if is_postgres():
+        row = cursor.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
+            (table.lower(), column.lower()),
+        ).fetchone()
+        if not row:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
+    else:
+        existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _table_exists(cursor, name):
-    row = cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (name,),
-    ).fetchone()
-    return row is not None
+    if is_postgres():
+        row = cursor.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_name = ? AND table_schema = 'public'",
+            (name.lower(),),
+        ).fetchone()
+        return row is not None
+    else:
+        row = cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
 
 
 def init_db():
@@ -112,8 +266,8 @@ def init_db():
             category TEXT NOT NULL DEFAULT 'Campus',
             status TEXT NOT NULL DEFAULT 'Upcoming',
             duration_hours REAL NOT NULL DEFAULT 4,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
@@ -132,7 +286,7 @@ def init_db():
             amount_kg REAL NOT NULL CHECK (amount_kg >= 0),
             notes TEXT,
             reported_by TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (event_id) REFERENCES events (id) ON DELETE CASCADE
         )
         """
@@ -157,7 +311,7 @@ def init_db():
             predicted_compost_kg REAL NOT NULL DEFAULT 0.0,
             predicted_landfill_kg REAL NOT NULL DEFAULT 0.0,
             assumptions TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (event_id) REFERENCES events (id) ON DELETE SET NULL
         )
         """
@@ -172,7 +326,7 @@ def init_db():
             event TEXT NOT NULL,
             rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
             message TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
@@ -187,7 +341,7 @@ def init_db():
             impact TEXT NOT NULL,
             tip TEXT NOT NULL,
             category TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
@@ -200,7 +354,7 @@ def init_db():
             name TEXT NOT NULL,
             qty REAL NOT NULL,
             unit TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
@@ -209,12 +363,11 @@ def init_db():
     _add_column_if_missing(cursor, "events", "category", "TEXT NOT NULL DEFAULT 'Campus'")
     _add_column_if_missing(cursor, "events", "status", "TEXT NOT NULL DEFAULT 'Upcoming'")
     _add_column_if_missing(cursor, "events", "duration_hours", "REAL NOT NULL DEFAULT 4")
-    # SQLite cannot ALTER-add a column with CURRENT_TIMESTAMP as the default.
-    _add_column_if_missing(cursor, "events", "updated_at", "TEXT")
+    _add_column_if_missing(cursor, "events", "updated_at", "TIMESTAMP")
     cursor.execute(
         """
         UPDATE events
-        SET updated_at = COALESCE(NULLIF(updated_at, ''), created_at, datetime('now'))
+        SET updated_at = COALESCE(NULLIF(updated_at, ''), created_at, CURRENT_TIMESTAMP)
         WHERE updated_at IS NULL OR updated_at = ''
         """
     )
@@ -338,21 +491,38 @@ def _seed_waste_reports(cursor):
 
 def _seed_practices(cursor):
     practices = [
-        # User specified examples:
         (
-            "Reusable Steel Cups",
-            "Single-use plastic cups and glasses",
-            "Reusable stainless steel cups and mugs",
-            "Replaces single-use polypropylene and wax-coated disposable cups for hot and cold beverages.",
-            "Set up a centralized cup washing counter or offer a token-deposit return scheme for attendees.",
+            "Plastic-Free Registration Kits",
+            "PVC badge pouches, plastic ballpoint pens, synthetic lanyards",
+            "Digital QR check-in, seed paper ID tags, cotton lanyards, recycled paper pens",
+            "Eliminates up to 0.12 kg of single-use plastic per registered participant.",
+            "Mandate digital check-in via SRIT portal; issue stamped reusable fabric wristbands.",
+            "Technical",
+            "plastic",
+        ),
+        (
+            "Bulk Beverage Refill Dispensers",
+            "Single-use 250ml/500ml PET water bottles and canned soft drinks",
+            "20L bubble top refill dispensers + copper/stainless-steel reusable water carafes",
+            "Diverts ~0.08 kg of PET bottle waste per attendee per 4-hour session.",
+            "Station volunteer water monitors at 3 campus quadrangle hydration booths.",
             "Food",
             "plastic",
         ),
         (
-            "Digital Certificates & Invitations",
-            "Paper waste (printed certificates, brochures, physical invitations)",
-            "Digital certificates and online invitations with QR verification",
-            "Eliminates high-grade glossy cardstock, plastic lamination film, and paper envelopes.",
+            "Areca Leaf & Bagasse Compostable Crockery",
+            "Single-use thermocol plates, laminated paper cups, polystyrene bowls",
+            "Natural pressed areca palm leaf plates and sugarcane bagasse clamshell containers",
+            "Converts ~0.25 kg of non-biodegradable food service trash into nutrient compost.",
+            "Tie up with SRIT Agricultural/NSS compost pits for 45-day on-campus breakdown.",
+            "Food",
+            "organic",
+        ),
+        (
+            "Paperless Digital Agendas & Certificates",
+            "Multi-page glossy brochures, printed schedules, paper participation certificates",
+            "Interactive mobile schedule web-app and downloadable cryptographic e-certificates",
+            "Saves ~0.05 kg of premium pulp paper per attendee.",
             "Generate digitally verifiable PDF certificates with student QR codes; distribute invitations via campus portal.",
             "Technical",
             "paper",
@@ -384,7 +554,6 @@ def _seed_practices(cursor):
             "Technical",
             "electronic",
         ),
-        # Additional campus practices:
         (
             "Refill water instead of bottles",
             "Single-use plastic water bottles",

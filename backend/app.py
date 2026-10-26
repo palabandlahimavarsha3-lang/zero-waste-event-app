@@ -113,9 +113,17 @@ def handle_method_not_allowed(_error):
     return jsonify({"error": "Method not allowed"}), 405
 
 
+try:
+    import psycopg2
+    PG_ERROR = psycopg2.Error
+except ImportError:
+    PG_ERROR = sqlite3.Error
+
+
 @app.errorhandler(sqlite3.Error)
-def handle_database_error(_error):
-    return jsonify({"error": "Database error"}), 500
+@app.errorhandler(PG_ERROR)
+def handle_database_error(error):
+    return jsonify({"error": "Database error", "details": str(error)}), 500
 
 
 @app.errorhandler(Exception)

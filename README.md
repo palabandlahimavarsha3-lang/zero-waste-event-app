@@ -1,9 +1,9 @@
 # Zero Waste Event App for SRIT Campus
 **A Full-Stack Campus Waste Forecasting, Event Tracking & Mitigation System**
 
-[![Backend Tests](https://img.shields.io/badge/pytest-23%20passed-brightgreen)](#testing-procedure)
+[![Backend Tests](https://img.shields.io/badge/pytest-28%20passed-brightgreen)](#testing-procedure)
 [![Frontend Build](https://img.shields.io/badge/vite-production%20ready-blue)](#frontend-production-build)
-[![Database](https://img.shields.io/badge/database-SQLite-lightgrey)](#database-design)
+[![Database](https://img.shields.io/badge/database-Neon%20Postgres%20%7C%20SQLite-brightgreen)](#database-design)
 [![Python](https://img.shields.io/badge/python-3.14-yellow)](#technology-stack)
 [![React](https://img.shields.io/badge/react-19-cyan)](#technology-stack)
 
@@ -28,7 +28,7 @@ The **Zero Waste Event App** is an engineering solution designed specifically fo
 - **Empirical Mitigation Modeling**: Model the mathematical impact of planned green policies (e.g., reusable dining ware, water refill kiosks, digital passes) with realistic diminishing-returns retention.
 - **Transparent Planning vs. Actual Auditing**: Clearly distinguish pre-event mathematical estimates from verified post-event scale measurements.
 - **Targeted Eco-Friendly Recommendations**: Deliver prioritized, actionable green swaps (e.g., plastic cups $\rightarrow$ stainless steel cups, paper badges $\rightarrow$ QR codes) without fabricated environmental statistics.
-- **Persistent Data Store & Analytics**: Store all events, prediction models, verified weigh-ins, and volunteer feedback in a persistent SQLite database.
+- **Persistent Data Store & Analytics**: Store all events, prediction models, verified weigh-ins, and volunteer feedback in a permanent Neon PostgreSQL database (with local SQLite fallback).
 - **Data-Driven Decision Making**: Equip campus authorities with monthly diversion rate trajectories, stream-wise breakdowns, and event-by-event waste audits.
 
 ---
@@ -38,8 +38,8 @@ The **Zero Waste Event App** is an engineering solution designed specifically fo
 | Layer | Technologies & Libraries | Key Responsibilities |
 |---|---|---|
 | **Frontend UI** | React 19, React Router v7, Recharts 3, Vanilla CSS | Single Page Application (SPA), interactive charts (Pie, Bar, Area, Line), responsive forms, filter pills, formula transparency drawer |
-| **Backend REST API** | Python 3, Flask, Flask-CORS | RESTful routing, input sanitization, data serialization, HTTP error handling, calculation engine |
-| **Database** | SQLite3 (`zero_waste.db`) | ACID-compliant relational persistence, foreign key cascading, automatic migrations |
+| **Backend REST API** | Python 3, Flask, Flask-CORS, Gunicorn | RESTful routing, input sanitization, data serialization, HTTP error handling, calculation engine |
+| **Database** | Neon Serverless Postgres (`psycopg2-binary`) / SQLite3 fallback | ACID-compliant relational persistence, zero-disk deployment on Render, automatic migrations |
 | **Prediction Engine** | Python rule-based mathematical model | Empirical baseline calculation, non-linear duration scaling, multiplicative measure retention |
 | **Build & Quality** | Vite 8, oxlint, pytest 9, PowerShell | Production bundling, static analysis, automated unit and integration testing |
 
@@ -120,9 +120,30 @@ The compiled output is generated in `frontend/dist/`.
 
 ---
 
+### Step 5: Neon Serverless Postgres Setup (Permanent Storage)
+
+For live cloud deployments on Render, the backend connects to **Neon Serverless PostgreSQL** via the `DATABASE_URL` environment variable:
+
+1. **Sign up**: Create a free account at [https://neon.tech](https://neon.tech) (no credit card needed).
+2. **Create Project**: Name it `zero-waste-db` with Postgres 16.
+3. **Copy Connection URI**: In Neon Dashboard, copy the connection URI:
+   ```text
+   postgresql://username:password@ep-xyz.us-east-2.aws.neon.tech/neondb?sslmode=require
+   ```
+4. **Set on Render**: In Render Dashboard $\rightarrow$ Web Service (`zero-waste-event-app`) $\rightarrow$ **Environment**, add:
+   * **Key**: `DATABASE_URL`
+   * **Value**: *[Your Neon Connection URI]*
+5. **Zero Disk Required**: The repo includes `render.yaml` with `disk: false` so no persistent paid disk is needed on Render.
+6. **Detailed Walkthrough**: See [NEON_SETUP.md](file:///c:/zero-waste-event-app/NEON_SETUP.md) for full screenshots and verification steps.
+
+---
+
 ## 5. Database Design & Relational Schema
 
-The application uses an ACID-compliant SQLite relational database (`backend/zero_waste.db`).
+The application features a **dual-engine persistence layer**:
+* **Production**: Neon Serverless PostgreSQL (via `psycopg2-binary` and `DATABASE_URL`).
+* **Local & Testing**: SQLite3 (`backend/instance/zerowaste.db`), enabled automatically whenever `DATABASE_URL` is omitted.
+
 
 ```mermaid
 erDiagram
